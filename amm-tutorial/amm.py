@@ -85,7 +85,7 @@ class Trader:
     def __init__(self):
         self.amm = AutomatedMarketMaker()
         
-    def run(self, state: TradingState) -> Tuple[Dict[str, List[Order]], Dict[Symbol, int], str]:
+    def run(self, state: TradingState) -> Dict[str, List[Order]]:
         """
         Main method called by the exchange to get the trader's orders.
         
@@ -140,8 +140,7 @@ class Trader:
         # Serialize to JSON string
         trader_data_json = json.dumps(trader_data)
         
-        # Create empty conversion dict (no conversions in this simple AMM)
-        conversions = {}
+        conversions = 1
         
         return result, conversions, trader_data_json
     
@@ -150,8 +149,3 @@ class Trader:
     
     def __repr__(self) -> str:
         return self.__str__()
-
-# If this file is executed directly, test the trader
-if __name__ == "__main__":
-    print("Testing AMM trader...")
-    # Add any testing code here
