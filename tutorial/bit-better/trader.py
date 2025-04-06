@@ -50,6 +50,8 @@ class ChangingPriceMM:
         else:
             volatility = mean_change  # If only one change, use that as volatility
             
+        print(f"Calculated volatility for {self.product}: {volatility}")
+
         return max(1.0, volatility)  # Ensure minimum volatility of 1.0
     
     def generate_orders(self, order_depth: OrderDepth, current_position: int) -> List[Order]:
@@ -92,6 +94,9 @@ class ChangingPriceMM:
             layer_bid = int(mid_price - layer_spread / 2) - (layer * layer_spacing)
             layer_ask = int(mid_price + layer_spread / 2) + (layer * layer_spacing) + 1
             
+            layer_bid = min(layer_bid, best_bid + 1)
+            layer_ask = max(layer_ask, best_ask - 1)
+
             # Calculate base order size for this layer
             # Orders get larger as they move away from mid price
             layer_size = int(self.base_order_size * (self.size_multiplier ** layer))
