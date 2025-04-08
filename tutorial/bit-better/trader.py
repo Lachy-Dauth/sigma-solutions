@@ -218,7 +218,7 @@ class Trader:
         # Dictionary to store market makers for each product
         self.market_makers = {}
         # Position limits for different products
-        self.position_limits = {"RAINFOREST_RESIN": 50, "KELP": 50}
+        self.position_limits = {"RAINFOREST_RESIN": 50, "KELP": 50, "SQUID_INK": 50}
         # Products that should use the StablePriceMM strategy with their target prices
         self.stable_products = {
             # Example: "PRODUCT_NAME": target_price

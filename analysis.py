@@ -2,9 +2,12 @@ import matplotlib.pyplot as plt
 import pandas as pd
 import re
 import io
+import math
+import os
+import numpy as np
 
 # Display execution metadata
-print(f"Script executed by Lachy-Dauth at 2025-04-06 05:30:13 UTC")
+print(f"Script executed by Lachy-Dauth at 2025-04-08 03:30:14 UTC")
 
 def extract_activity_log_data(file_path):
     """Extract only the activity log data from a mixed log file."""
@@ -66,112 +69,168 @@ else:
 print(f"Processing data with {len(df)} total rows")
 print(f"Columns in the data: {df.columns.tolist()}")
 
-# Filter to only the relevant products
-kelp_df = df[df['product'] == 'KELP'].sort_values('timestamp')
-resin_df = df[df['product'] == 'RAINFOREST_RESIN'].sort_values('timestamp')
+# Create an output directory for CSV files if it doesn't exist
+csv_dir = "commodity_prices"
+if not os.path.exists(csv_dir):
+    os.makedirs(csv_dir)
+    print(f"Created directory {csv_dir} for CSV exports")
 
-print(f"Found {len(kelp_df)} KELP records and {len(resin_df)} RAINFOREST_RESIN records")
+# Get unique products in the data
+unique_products = df['product'].unique()
+print(f"Found {len(unique_products)} unique products: {', '.join(unique_products)}")
 
-# Create a figure with two subplots (one for each product)
-fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10))
-fig.suptitle('Price Trends Over Time', fontsize=16)
+# Create a dictionary to store product-specific dataframes
+product_dfs = {}
 
-# Plot KELP prices
-ax1.plot(kelp_df['timestamp'], kelp_df['mid_price'], 'b-o', label='Mid Price')
-ax1.plot(kelp_df['timestamp'], kelp_df['bid_price_1'], 'g--^', label='Top Bid')
-ax1.plot(kelp_df['timestamp'], kelp_df['ask_price_1'], 'r--v', label='Top Ask')
-ax1.set_title('KELP Price Trends')
-ax1.set_xlabel('Timestamp')
-ax1.set_ylabel('Price (SEASHELLS)')
-ax1.grid(True, alpha=0.3)
-ax1.legend()
+# Filter data by product and export CSV files
+for product in unique_products:
+    product_dfs[product] = df[df['product'] == product].sort_values('timestamp')
+    print(f"Found {len(product_dfs[product])} {product} records")
+    
+    # Export price data to CSV
+    csv_filename = os.path.join(csv_dir, f"{product}_prices.csv")
+    
+    # Select only the columns we want to export
+    price_data = product_dfs[product][['timestamp', 'mid_price', 'bid_price_1', 'ask_price_1']]
+    price_data.to_csv(csv_filename, index=False)
+    print(f"Exported price data for {product} to {csv_filename}")
 
-# Plot RAINFOREST_RESIN prices
-ax2.plot(resin_df['timestamp'], resin_df['mid_price'], 'b-o', label='Mid Price')
-ax2.plot(resin_df['timestamp'], resin_df['bid_price_1'], 'g--^', label='Top Bid')
-ax2.plot(resin_df['timestamp'], resin_df['ask_price_1'], 'r--v', label='Top Ask')
-ax2.set_title('RAINFOREST_RESIN Price Trends')
-ax2.set_xlabel('Timestamp')
-ax2.set_ylabel('Price (SEASHELLS)')
-ax2.grid(True, alpha=0.3)
-ax2.legend()
+# Determine how to layout the plots based on number of products
+def get_subplot_layout(n):
+    """Determine a reasonable subplot layout for n plots"""
+    rows = max(1, math.ceil(n / 2))
+    cols = min(n, 2)
+    return rows, cols
 
-# Add annotations for significant price changes
-if len(kelp_df) > 1:
-    kelp_df['price_change'] = kelp_df['mid_price'].diff().abs()
-    max_change_idx = kelp_df['price_change'].idxmax()
-    if not pd.isna(max_change_idx):
-        max_change_row = kelp_df.loc[max_change_idx]
-        ax1.annotate(f'Price Shift: {max_change_row["price_change"]:.2f}', 
-                     xy=(max_change_row['timestamp'], max_change_row['mid_price']), 
-                     xytext=(max_change_row['timestamp']-50, max_change_row['mid_price']+1),
-                     arrowprops=dict(facecolor='black', shrink=0.05))
+# Function to plot price trends for a set of products
+def plot_price_trends(product_dfs):
+    rows, cols = get_subplot_layout(len(product_dfs))
+    fig, axes = plt.subplots(rows, cols, figsize=(12, 5 * rows))
+    fig.suptitle('Price Trends Over Time', fontsize=16)
+    
+    # Make sure axes is always a 2D array
+    if len(product_dfs) == 1:
+        axes = np.array([[axes]])
+    elif rows == 1:
+        axes = axes.reshape(1, -1)
+    
+    i, j = 0, 0
+    for product, product_df in product_dfs.items():
+        ax = axes[i][j]
+        ax.plot(product_df['timestamp'], product_df['mid_price'], 'b-o', label='Mid Price')
+        ax.plot(product_df['timestamp'], product_df['bid_price_1'], 'g--^', label='Top Bid')
+        ax.plot(product_df['timestamp'], product_df['ask_price_1'], 'r--v', label='Top Ask')
+        ax.set_title(f'{product} Price Trends')
+        ax.set_xlabel('Timestamp')
+        ax.set_ylabel('Price (SEASHELLS)')
+        ax.grid(True, alpha=0.3)
+        ax.legend()
+        
+        # Add annotations for significant price changes
+        if len(product_df) > 1:
+            product_df['price_change'] = product_df['mid_price'].diff().abs()
+            max_change_idx = product_df['price_change'].idxmax()
+            if not pd.isna(max_change_idx):
+                max_change_row = product_df.loc[max_change_idx]
+                ax.annotate(f'Price Shift: {max_change_row["price_change"]:.2f}', 
+                         xy=(max_change_row['timestamp'], max_change_row['mid_price']), 
+                         xytext=(max_change_row['timestamp']-50, max_change_row['mid_price']+1),
+                         arrowprops=dict(facecolor='black', shrink=0.05))
+        
+        # Update position for next plot
+        j += 1
+        if j >= cols:
+            j = 0
+            i += 1
+    
+    # Hide unused subplots
+    for i_pad in range(i, rows):
+        for j_pad in range((0 if i_pad > i else j), cols):
+            fig.delaxes(axes[i_pad][j_pad])
+    
+    plt.tight_layout(rect=[0, 0, 1, 0.95])
+    plt.savefig('market_price_analysis.png', dpi=300)
+    print("Saved price analysis chart to market_price_analysis.png")
 
-if len(resin_df) > 1:
-    resin_df['price_change'] = resin_df['mid_price'].diff().abs()
-    max_change_idx = resin_df['price_change'].idxmax()
-    if not pd.isna(max_change_idx):
-        max_change_row = resin_df.loc[max_change_idx]
-        ax2.annotate(f'Price Shift: {max_change_row["price_change"]:.2f}', 
-                     xy=(max_change_row['timestamp'], max_change_row['mid_price']), 
-                     xytext=(max_change_row['timestamp']-50, max_change_row['mid_price']+5),
-                     arrowprops=dict(facecolor='black', shrink=0.05))
+# Function to plot bid-ask spreads
+def plot_bid_ask_spreads(product_dfs):
+    rows, cols = get_subplot_layout(len(product_dfs))
+    fig, axes = plt.subplots(rows, cols, figsize=(12, 4 * rows))
+    fig.suptitle('Bid-Ask Spread Over Time', fontsize=16)
+    
+    # Make sure axes is always a 2D array
+    if len(product_dfs) == 1:
+        axes = np.array([[axes]])
+    elif rows == 1:
+        axes = axes.reshape(1, -1)
+    
+    i, j = 0, 0
+    for product, product_df in product_dfs.items():
+        ax = axes[i][j]
+        product_df['spread'] = product_df['ask_price_1'] - product_df['bid_price_1']
+        ax.plot(product_df['timestamp'], product_df['spread'], 'm-o')
+        ax.set_title(f'{product} Bid-Ask Spread')
+        ax.set_xlabel('Timestamp')
+        ax.set_ylabel('Spread (SEASHELLS)')
+        ax.grid(True, alpha=0.3)
+        ax.set_ylim(bottom=0)
+        
+        # Update position for next plot
+        j += 1
+        if j >= cols:
+            j = 0
+            i += 1
+    
+    # Hide unused subplots
+    for i_pad in range(i, rows):
+        for j_pad in range((0 if i_pad > i else j), cols):
+            fig.delaxes(axes[i_pad][j_pad])
+    
+    plt.tight_layout(rect=[0, 0, 1, 0.95])
+    plt.savefig('spread_analysis.png', dpi=300)
+    print("Saved spread analysis chart to spread_analysis.png")
 
-plt.tight_layout(rect=[0, 0, 1, 0.95])
-plt.savefig('market_price_analysis.png', dpi=300)
-print("Saved price analysis chart to market_price_analysis.png")
+# Function to plot volumes
+def plot_volumes(product_dfs):
+    rows, cols = get_subplot_layout(len(product_dfs))
+    fig, axes = plt.subplots(rows, cols, figsize=(12, 4 * rows))
+    fig.suptitle('Volume Analysis Over Time', fontsize=16)
+    
+    # Make sure axes is always a 2D array
+    if len(product_dfs) == 1:
+        axes = np.array([[axes]])
+    elif rows == 1:
+        axes = axes.reshape(1, -1)
+    
+    i, j = 0, 0
+    for product, product_df in product_dfs.items():
+        ax = axes[i][j]
+        ax.bar(product_df['timestamp'] - 2, product_df['bid_volume_1'], width=4, color='green', alpha=0.6, label='Top Bid Volume')
+        ax.bar(product_df['timestamp'] + 2, product_df['ask_volume_1'], width=4, color='red', alpha=0.6, label='Top Ask Volume')
+        ax.set_title(f'{product} Volume')
+        ax.set_xlabel('Timestamp')
+        ax.set_ylabel('Volume')
+        ax.grid(True, alpha=0.3)
+        ax.legend()
+        
+        # Update position for next plot
+        j += 1
+        if j >= cols:
+            j = 0
+            i += 1
+    
+    # Hide unused subplots
+    for i_pad in range(i, rows):
+        for j_pad in range((0 if i_pad > i else j), cols):
+            fig.delaxes(axes[i_pad][j_pad])
+    
+    plt.tight_layout(rect=[0, 0, 1, 0.95])
+    plt.savefig('volume_analysis.png', dpi=300)
+    print("Saved volume analysis chart to volume_analysis.png")
 
-# Create a second figure to show the bid-ask spread over time
-fig2, (ax3, ax4) = plt.subplots(2, 1, figsize=(12, 8))
-fig2.suptitle('Bid-Ask Spread Over Time', fontsize=16)
-
-# Calculate spreads
-kelp_df['spread'] = kelp_df['ask_price_1'] - kelp_df['bid_price_1']
-resin_df['spread'] = resin_df['ask_price_1'] - resin_df['bid_price_1']
-
-# Plot spreads
-ax3.plot(kelp_df['timestamp'], kelp_df['spread'], 'm-o', label='KELP Spread')
-ax3.set_title('KELP Bid-Ask Spread')
-ax3.set_xlabel('Timestamp')
-ax3.set_ylabel('Spread (SEASHELLS)')
-ax3.grid(True, alpha=0.3)
-ax3.set_ylim(bottom=0)
-
-ax4.plot(resin_df['timestamp'], resin_df['spread'], 'c-o', label='RAINFOREST_RESIN Spread')
-ax4.set_title('RAINFOREST_RESIN Bid-Ask Spread')
-ax4.set_xlabel('Timestamp')
-ax4.set_ylabel('Spread (SEASHELLS)')
-ax4.grid(True, alpha=0.3)
-ax4.set_ylim(bottom=0)
-
-plt.tight_layout(rect=[0, 0, 1, 0.95])
-plt.savefig('spread_analysis.png', dpi=300)
-print("Saved spread analysis chart to spread_analysis.png")
-
-# Add volume analysis
-fig3, (ax5, ax6) = plt.subplots(2, 1, figsize=(12, 8))
-fig3.suptitle('Volume Analysis Over Time', fontsize=16)
-
-# Plot volumes for KELP
-ax5.bar(kelp_df['timestamp'] - 2, kelp_df['bid_volume_1'], width=4, color='green', alpha=0.6, label='Top Bid Volume')
-ax5.bar(kelp_df['timestamp'] + 2, kelp_df['ask_volume_1'], width=4, color='red', alpha=0.6, label='Top Ask Volume')
-ax5.set_title('KELP Volume')
-ax5.set_xlabel('Timestamp')
-ax5.set_ylabel('Volume')
-ax5.grid(True, alpha=0.3)
-ax5.legend()
-
-# Plot volumes for RAINFOREST_RESIN
-ax6.bar(resin_df['timestamp'] - 2, resin_df['bid_volume_1'], width=4, color='green', alpha=0.6, label='Top Bid Volume')
-ax6.bar(resin_df['timestamp'] + 2, resin_df['ask_volume_1'], width=4, color='red', alpha=0.6, label='Top Ask Volume')
-ax6.set_title('RAINFOREST_RESIN Volume')
-ax6.set_xlabel('Timestamp')
-ax6.set_ylabel('Volume')
-ax6.grid(True, alpha=0.3)
-ax6.legend()
-
-plt.tight_layout(rect=[0, 0, 1, 0.95])
-plt.savefig('volume_analysis.png', dpi=300)
-print("Saved volume analysis chart to volume_analysis.png")
+# Create the three types of visualizations
+plot_price_trends(product_dfs)
+plot_bid_ask_spreads(product_dfs)
+plot_volumes(product_dfs)
 
 print("Analysis complete!")
