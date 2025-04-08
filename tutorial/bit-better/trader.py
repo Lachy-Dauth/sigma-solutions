@@ -2,28 +2,28 @@ from datamodel import OrderDepth, Trade, TradingState, Order, ProsperityEncoder,
 from typing import Dict, List, Tuple
 import json
 import math
+import numpy as np
 
 class ChangingPriceMM:
     """
     Class that implements a dynamic market making strategy with layered orders
-    and volatility-based spread adjustment.
+    and polynomial prediction-based price adjustment.
     """
     def __init__(self, product: str, position_limit: int = 50):
         self.product = product
         self.position_limit = position_limit
         self.price_history = []
-        self.window_size = 10
+        self.window_size = 5
         self.min_spread = 1
-        self.volatility_multiplier = 2.0
         self.base_order_size = 5
         self.num_layers = 3
         self.size_multiplier = 1.5
         self.layer_spacing_factor = 1.0
+        self.poly_degree = 1
         
-    def calculate_volatility(self, current_mid: float) -> float:
+    def predict_next_price(self, current_mid: float) -> float:
         """
-        Calculate the volatility based on recent price history
-        Returns the standard deviation of price changes
+        Use polynomial fit to predict the next price based on recent price history
         """
         # Add current price to history
         self.price_history.append(current_mid)
@@ -32,31 +32,43 @@ class ChangingPriceMM:
         if len(self.price_history) > self.window_size:
             self.price_history.pop(0)
         
-        # Need at least 2 data points to calculate volatility
-        if len(self.price_history) < 2:
-            return 1.0  # Default volatility when we don't have enough data
+        # Need at least poly_degree + 1 data points to fit polynomial
+        if len(self.price_history) <= self.poly_degree:
+            return current_mid  # Not enough data for prediction
         
-        # Calculate price changes
-        price_changes = [abs(self.price_history[i] - self.price_history[i-1]) 
-                         for i in range(1, len(self.price_history))]
+        # Fit polynomial of degree poly_degree
+        x = np.arange(len(self.price_history))
+        y = np.array(self.price_history)
+        coeffs = np.polyfit(x, y, self.poly_degree)
         
-        # Calculate mean of price changes
-        mean_change = sum(price_changes) / len(price_changes)
+        # Predict the next value (one step beyond current window)
+        next_x = len(self.price_history)
+        next_price = np.polyval(coeffs, next_x)
         
-        # Calculate standard deviation (volatility)
-        if len(price_changes) > 1:
-            variance = sum((x - mean_change) ** 2 for x in price_changes) / len(price_changes)
-            volatility = math.sqrt(variance)
-        else:
-            volatility = mean_change  # If only one change, use that as volatility
-            
-        print(f"Calculated volatility for {self.product}: {volatility}")
-
-        return max(1.0, volatility)  # Ensure minimum volatility of 1.0
+        # Calculate price trend (direction and magnitude)
+        price_trend = next_price - current_mid
+        
+        print(f"Polynomial prediction for {self.product}: Current {current_mid}, Next {next_price}, Trend {price_trend}")
+        
+        return next_price
+    
+    def calculate_dynamic_spread(self, current_mid: float, predicted_price: float) -> int:
+        """
+        Calculate a dynamic spread based on the difference between current and predicted price
+        """
+        # Calculate the absolute difference between current and predicted price
+        price_diff = abs(predicted_price - current_mid)
+        
+        # Use the difference to determine spread - larger difference means more uncertainty
+        dynamic_spread = max(self.min_spread, int(price_diff * 2) + 1)
+        
+        print(f"Dynamic spread for {self.product}: {dynamic_spread}")
+        
+        return dynamic_spread
     
     def generate_orders(self, order_depth: OrderDepth, current_position: int) -> List[Order]:
         """
-        Generate layered orders based on market depth, volatility, and position
+        Generate layered orders based on market depth, price prediction, and position
         """
         orders = []
         
@@ -71,12 +83,19 @@ class ChangingPriceMM:
         # Calculate mid price
         mid_price = (best_bid + best_ask) / 2
         
-        # Calculate volatility and determine spread
-        volatility = self.calculate_volatility(mid_price)
-        dynamic_spread = max(self.min_spread, int(volatility * self.volatility_multiplier))
+        # Predict next price using polynomial fit
+        predicted_price = self.predict_next_price(mid_price)
         
-        # Calculate layer spacing based on volatility
-        layer_spacing = max(1, int(volatility * self.layer_spacing_factor))
+        # Use predicted price to determine our price bias
+        # If predicted_price > mid_price, we expect price to rise
+        # If predicted_price < mid_price, we expect price to fall
+        price_bias = predicted_price - mid_price
+        
+        # Calculate dynamic spread based on prediction
+        dynamic_spread = self.calculate_dynamic_spread(mid_price, predicted_price)
+        
+        # Calculate layer spacing
+        layer_spacing = max(1, int(dynamic_spread * 0.5 * self.layer_spacing_factor))
         
         # Position bias - adjust our base order sizes based on current position
         position_ratio = current_position / self.position_limit  # Range: -1.0 to 1.0
@@ -85,15 +104,19 @@ class ChangingPriceMM:
         buy_capacity = self.position_limit - current_position
         sell_capacity = self.position_limit + current_position
         
+        # Center our orders around the predicted price instead of mid price
+        center_price = mid_price + (price_bias * 0.5)  # Only partially shift toward prediction
+        
         # Place layered orders
         for layer in range(self.num_layers):
             # Calculate layer-specific spread (increases with each layer)
             layer_spread = dynamic_spread + (layer * layer_spacing * 2)
             
-            # Calculate prices for this layer
-            layer_bid = int(mid_price - layer_spread / 2) - (layer * layer_spacing)
-            layer_ask = int(mid_price + layer_spread / 2) + (layer * layer_spacing) + 1
+            # Calculate prices for this layer, centered around our center_price
+            layer_bid = int(center_price - layer_spread / 2) - (layer * layer_spacing)
+            layer_ask = int(center_price + layer_spread / 2) + (layer * layer_spacing) + 1
             
+            # Ensure our prices are competitive
             layer_bid = min(layer_bid, best_bid + 1)
             layer_ask = max(layer_ask, best_ask - 1)
 
@@ -104,6 +127,11 @@ class ChangingPriceMM:
             # Adjust sizes based on position
             buy_size = int(layer_size * (1 - 0.5 * position_ratio))  # Buy less when position is high
             sell_size = int(layer_size * (1 + 0.5 * position_ratio))  # Sell more when position is high
+            
+            # Price trend bias - buy more if price rising, sell more if falling
+            trend_factor = 0.2 * (price_bias / max(1, abs(mid_price)) * 100)  # Normalized trend factor
+            buy_size = int(buy_size * (1 + trend_factor)) if price_bias > 0 else buy_size  
+            sell_size = int(sell_size * (1 - trend_factor)) if price_bias > 0 else sell_size
             
             # Ensure minimum size is at least 1
             buy_size = max(1, buy_size)

@@ -3,6 +3,7 @@ import json
 import argparse
 import os
 import sys
+import matplotlib.pyplot as plt
 from datetime import datetime
 
 class RNN:
@@ -126,10 +127,22 @@ def normalize_data(data):
     std[std == 0] = 1
     return (data - mean) / std, mean, std
 
-def train_rnn(data, epochs=100, hidden_size=64, sequence_length=5):
-    """Train an RNN on the provided data"""
+def create_sequences(data, sequence_length):
+    """Create input/output sequences from the time series data"""
+    inputs = []
+    targets = []
+    
+    for i in range(len(data) - sequence_length):
+        inputs.append(data[i:i+sequence_length])
+        targets.append(data[i+sequence_length])
+    
+    return np.array(inputs), np.array(targets)
+
+def train_rnn(data, validation_split=0.2, epochs=100, hidden_size=64, sequence_length=5):
+    """Train an RNN on the provided data with validation"""
     # Use all columns except the first one (timestamp) as features
     features = data[:, 1:]
+    timestamps = data[:, 0]
     
     # Normalize the features
     normalized_features, mean, std = normalize_data(features)
@@ -140,50 +153,82 @@ def train_rnn(data, epochs=100, hidden_size=64, sequence_length=5):
     # Create the RNN model
     rnn = RNN(input_size=input_size, output_size=output_size, hidden_size=hidden_size)
     
-    # Create training sequences
-    print(f"Creating training sequences with length {sequence_length}")
-    inputs = []
-    targets = []
+    # Create sequences
+    print(f"Creating sequences with length {sequence_length}")
+    inputs, targets = create_sequences(normalized_features, sequence_length)
     
-    for i in range(len(normalized_features) - sequence_length):
-        inputs.append(normalized_features[i:i+sequence_length])
-        targets.append(normalized_features[i+sequence_length])
+    # Split into training and validation sets
+    split_idx = int(len(inputs) * (1 - validation_split))
+    train_inputs, val_inputs = inputs[:split_idx], inputs[split_idx:]
+    train_targets, val_targets = targets[:split_idx], targets[split_idx:]
     
-    inputs = np.array(inputs)
-    targets = np.array(targets)
-    
-    print(f"Training with {len(inputs)} sequences")
+    print(f"Training with {len(train_inputs)} sequences, validating with {len(val_inputs)} sequences")
     
     # Train the RNN
-    losses = []
+    train_losses = []
+    val_losses = []
+    
     for epoch in range(epochs):
-        epoch_losses = []
-        
-        for i in range(len(inputs)):
-            input_seq = inputs[i]
-            target_seq = targets[i]
+        # Training
+        train_epoch_losses = []
+        for i in range(len(train_inputs)):
+            input_seq = train_inputs[i]
+            target_seq = train_targets[i]
             
             # Forward pass
             output = rnn.forward(input_seq)
             
             # Compute loss (mean squared error)
             loss = np.mean((output - target_seq.reshape(-1, 1)) ** 2)
-            epoch_losses.append(loss)
+            train_epoch_losses.append(loss)
             
             # Backward pass
             rnn.backward(output - target_seq.reshape(-1, 1))
         
-        avg_loss = np.mean(epoch_losses)
-        losses.append(avg_loss)
+        avg_train_loss = np.mean(train_epoch_losses)
+        train_losses.append(avg_train_loss)
         
-        if epoch % 10 == 0:
-            print(f"Epoch {epoch}/{epochs}, Loss: {avg_loss:.6f}")
+        # Validation
+        val_epoch_losses = []
+        for i in range(len(val_inputs)):
+            input_seq = val_inputs[i]
+            target_seq = val_targets[i]
+            
+            # Forward pass (no backward pass for validation)
+            output = rnn.forward(input_seq)
+            
+            # Compute validation loss
+            loss = np.mean((output - target_seq.reshape(-1, 1)) ** 2)
+            val_epoch_losses.append(loss)
+        
+        avg_val_loss = np.mean(val_epoch_losses)
+        val_losses.append(avg_val_loss)
+        
+        if epoch % 10 == 0 or epoch == epochs - 1:
+            print(f"Epoch {epoch}/{epochs}, Train Loss: {avg_train_loss:.6f}, Val Loss: {avg_val_loss:.6f}")
+    
+    # Generate predictions for plotting
+    all_predictions = []
+    for i in range(len(inputs)):
+        input_seq = inputs[i]
+        prediction = rnn.predict(input_seq)
+        all_predictions.append(prediction.flatten())
+    
+    all_predictions = np.array(all_predictions)
+    
+    # Denormalize predictions and targets
+    denorm_predictions = (all_predictions * std) + mean
+    denorm_targets = (targets * std) + mean
+    
+    # Add sequence_length to get the correct timestamps
+    prediction_timestamps = timestamps[sequence_length:]
     
     # Add training statistics to the model
     rnn_dict = rnn.to_json()
     rnn_dict["training"] = {
         "epochs": epochs,
-        "final_loss": float(losses[-1]),
+        "final_train_loss": float(train_losses[-1]),
+        "final_val_loss": float(val_losses[-1]),
         "sequence_length": sequence_length,
         "normalization_params": {
             "mean": mean.tolist(),
@@ -191,11 +236,66 @@ def train_rnn(data, epochs=100, hidden_size=64, sequence_length=5):
         }
     }
     
-    return rnn_dict
+    return rnn_dict, denorm_predictions, denorm_targets, prediction_timestamps, train_losses, val_losses
+
+def plot_predictions_vs_actual(timestamps, predictions, actuals, output_prefix='prediction'):
+    """Plot predictions versus actual values for each feature"""
+    n_features = predictions.shape[1]
+    feature_names = ['Mid Price', 'Bid Price', 'Ask Price']
+    
+    # Create a figure with subplots for each feature
+    fig, axes = plt.subplots(n_features, 1, figsize=(12, 4 * n_features))
+    fig.suptitle('RNN Predictions vs Actual Values', fontsize=16)
+    
+    for i in range(n_features):
+        ax = axes[i] if n_features > 1 else axes
+        
+        # Plot actual values
+        ax.plot(timestamps, actuals[:, i], 'b-', label='Actual', alpha=0.7)
+        
+        # Plot predicted values
+        ax.plot(timestamps, predictions[:, i], 'r--', label='Predicted', alpha=0.7)
+        
+        # Add labels and legend
+        feature_name = feature_names[i] if i < len(feature_names) else f'Feature {i+1}'
+        ax.set_title(f'{feature_name} - Prediction vs Actual')
+        ax.set_xlabel('Timestamp')
+        ax.set_ylabel('Price')
+        ax.grid(True, alpha=0.3)
+        ax.legend()
+    
+    plt.tight_layout(rect=[0, 0, 1, 0.95])
+    
+    # Save the plot
+    filename = f'{output_prefix}_vs_actual.png'
+    plt.savefig(filename, dpi=300)
+    print(f"Saved prediction vs actual plot to {filename}")
+    
+    return fig
+
+def plot_training_loss(train_losses, val_losses=None, output_name='training_loss.png'):
+    """Plot the training and validation loss over time"""
+    plt.figure(figsize=(10, 6))
+    plt.plot(train_losses, 'b-', label='Training Loss')
+    
+    if val_losses is not None:
+        plt.plot(val_losses, 'r-', label='Validation Loss')
+    
+    plt.title('RNN Training and Validation Loss')
+    plt.xlabel('Epoch')
+    plt.ylabel('Loss (MSE)')
+    plt.grid(True, alpha=0.3)
+    plt.legend()
+    
+    plt.tight_layout()
+    plt.savefig(output_name, dpi=300)
+    print(f"Saved training loss plot to {output_name}")
 
 def main():
-    # Print execution information
-    print(f"Script executed by Lachy-Dauth at {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC")
+    # Current date and time info
+    current_time = "2025-04-08 07:10:32" # Hardcoded as provided
+    current_user = "Lachy-Dauth" # Hardcoded as provided
+    print(f"Script executed by {current_user} at {current_time}")
     
     # Parse command-line arguments
     parser = argparse.ArgumentParser(description='Train an RNN on time series data from a CSV file')
@@ -204,6 +304,7 @@ def main():
     parser.add_argument('--epochs', type=int, default=100, help='Number of training epochs')
     parser.add_argument('--hidden-size', type=int, default=64, help='Size of the hidden layer')
     parser.add_argument('--sequence-length', type=int, default=5, help='Sequence length for training')
+    parser.add_argument('--validation-split', type=float, default=0.2, help='Fraction of data to use for validation')
     
     args = parser.parse_args()
     
@@ -211,10 +312,11 @@ def main():
     print(f"Loading data from {args.input_csv}")
     data = load_data_from_csv(args.input_csv)
     
-    # Train the RNN model
+    # Train the RNN model and get predictions
     print(f"Training RNN with {args.epochs} epochs and hidden size {args.hidden_size}")
-    rnn_dict = train_rnn(
+    rnn_dict, predictions, actuals, timestamps, train_losses, val_losses = train_rnn(
         data, 
+        validation_split=args.validation_split,
         epochs=args.epochs, 
         hidden_size=args.hidden_size,
         sequence_length=args.sequence_length
@@ -226,33 +328,27 @@ def main():
     
     print(f"RNN model saved to {args.output}")
     
-    # Generate a sample prediction
-    try:
-        # Recreate RNN from the saved dictionary
-        rnn = RNN.from_json(rnn_dict)
-        
-        # Get the last sequence from the data
-        features = data[:, 1:]
-        mean = np.array(rnn_dict["training"]["normalization_params"]["mean"])
-        std = np.array(rnn_dict["training"]["normalization_params"]["std"])
-        
-        # Normalize the last sequence
-        normalized_features = (features - mean) / std
-        last_sequence = normalized_features[-args.sequence_length:]
-        
-        # Make a prediction
-        prediction = rnn.predict(last_sequence)
-        
-        # Denormalize the prediction
-        denormalized_prediction = (prediction.flatten() * std) + mean
-        
-        print("\nSample prediction for the next timestep:")
-        print(f"Mid price: {denormalized_prediction[0]:.2f}")
-        print(f"Bid price: {denormalized_prediction[1]:.2f}")
-        print(f"Ask price: {denormalized_prediction[2]:.2f}")
-        
-    except Exception as e:
-        print(f"Error generating sample prediction: {e}")
+    # Plot and save the training/validation loss curves
+    plot_training_loss(train_losses, val_losses)
+    
+    # Plot and save the predictions vs actual values
+    output_prefix = os.path.splitext(args.output)[0]
+    plot_predictions_vs_actual(timestamps, predictions, actuals, output_prefix)
+    
+    # Print some metrics
+    mse = np.mean((predictions - actuals) ** 2)
+    mae = np.mean(np.abs(predictions - actuals))
+    print(f"\nPrediction Performance:")
+    print(f"Mean Squared Error: {mse:.6f}")
+    print(f"Mean Absolute Error: {mae:.6f}")
+    
+    # Feature-specific metrics
+    feature_names = ['Mid Price', 'Bid Price', 'Ask Price']
+    for i in range(predictions.shape[1]):
+        feature_name = feature_names[i] if i < len(feature_names) else f'Feature {i+1}'
+        feature_mse = np.mean((predictions[:, i] - actuals[:, i]) ** 2)
+        feature_mae = np.mean(np.abs(predictions[:, i] - actuals[:, i]))
+        print(f"{feature_name} - MSE: {feature_mse:.6f}, MAE: {feature_mae:.6f}")
 
 if __name__ == "__main__":
     main()
