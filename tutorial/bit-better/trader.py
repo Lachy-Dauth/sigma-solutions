@@ -3,11 +3,10 @@ from typing import Dict, List, Tuple
 import json
 import math
 import numpy as np
-
 class ChangingPriceMM:
     """
     Class that implements a dynamic market making strategy with layered orders
-    and polynomial prediction-based price adjustment.
+    and Exponential Moving Average (EMA) prediction-based price adjustment.
     """
     def __init__(self, product: str, position_limit: int = 50):
         self.product = product
@@ -19,145 +18,129 @@ class ChangingPriceMM:
         self.num_layers = 3
         self.size_multiplier = 1.5
         self.layer_spacing_factor = 1.0
-        self.poly_degree = 1
         
     def predict_next_price(self, current_mid: float) -> float:
         """
-        Use polynomial fit to predict the next price based on recent price history
+        Use Exponential Moving Average (EMA) to predict the next price.
+        EMA is a better alternative to polynomial fitting for financial time series.
         """
-        # Add current price to history
         self.price_history.append(current_mid)
         
         # Keep only the latest window_size prices
         if len(self.price_history) > self.window_size:
             self.price_history.pop(0)
         
-        # Need at least poly_degree + 1 data points to fit polynomial
-        if len(self.price_history) <= self.poly_degree:
+        if len(self.price_history) < 2:
             return current_mid  # Not enough data for prediction
         
-        # Fit polynomial of degree poly_degree
-        x = np.arange(len(self.price_history))
-        y = np.array(self.price_history)
-        coeffs = np.polyfit(x, y, self.poly_degree)
-        
-        # Predict the next value (one step beyond current window)
-        next_x = len(self.price_history)
-        next_price = np.polyval(coeffs, next_x)
-        
-        # Calculate price trend (direction and magnitude)
-        price_trend = next_price - current_mid
-        
-        print(f"Polynomial prediction for {self.product}: Current {current_mid}, Next {next_price}, Trend {price_trend}")
-        
-        return next_price
+        # Calculate EMA with smoothing factor
+        smoothing_factor = 2 / (self.window_size + 1)
+        ema = current_mid  # Start with the current price
+        for price in reversed(self.price_history[:-1]):
+            ema = smoothing_factor * price + (1 - smoothing_factor) * ema
+
+        print(f"EMA prediction for {self.product}: Current {current_mid}, Predicted {ema}")
+        return ema
     
-    def calculate_dynamic_spread(self, current_mid: float, predicted_price: float) -> int:
+    def calculate_dynamic_spread(self, current_mid: float, predicted_price: float, order_depth: OrderDepth) -> int:
         """
-        Calculate a dynamic spread based on the difference between current and predicted price
+        Calculate dynamic spread based on liquidity and volatility.
+        Spread should be narrower when the market is more liquid.
         """
-        # Calculate the absolute difference between current and predicted price
-        price_diff = abs(predicted_price - current_mid)
+        # Calculate volatility (you can use the previous method here)
+        volatility = self.calculate_volatility(current_mid)
+
+        # Calculate liquidity by considering the order book depth (depth of buy/sell orders)
+        liquidity_factor = len(order_depth.buy_orders) + len(order_depth.sell_orders)
+
+        # Use volatility and liquidity to determine spread
+        dynamic_spread = max(
+            self.min_spread,
+            int(volatility * 2) + 1,
+            int(10 / liquidity_factor)  # Lower spread if liquidity is higher
+        )
         
-        # Use the difference to determine spread - larger difference means more uncertainty
-        dynamic_spread = max(self.min_spread, int(price_diff * 2) + 1)
-        
-        print(f"Dynamic spread for {self.product}: {dynamic_spread}")
-        
+        print(f"Dynamic spread based on volatility and liquidity: {dynamic_spread}")
         return dynamic_spread
-    
-    def generate_orders(self, order_depth: OrderDepth, current_position: int) -> List[Order]:
+
+    def calculate_volatility(self, current_mid: float) -> float:
         """
-        Generate layered orders based on market depth, price prediction, and position
+        Calculate the volatility as the standard deviation of recent prices.
+        """
+        if len(self.price_history) < 2:
+            return 0.0  # Not enough data for volatility calculation
+        
+        return np.std(self.price_history)
+    
+    def calculate_order_size(self, predicted_price: float, current_position: int) -> int:
+        """
+        Calculate order size using a risk-adjusted approach (like Kelly Criterion).
+        """
+        edge = predicted_price - current_position  # This can be more complex; consider it as an edge score
+        kelly_fraction = edge / self.position_limit  # Kelly Criterion fraction
+        order_size = int(self.base_order_size * kelly_fraction)
+        
+        # Ensure we're within position limits
+        order_size = max(1, min(order_size, self.position_limit - current_position))
+        print(f"Order size based on Kelly Criterion: {order_size}")
+        return order_size
+
+    def generate_orders(self, order_depth: OrderDepth, current_position: int) -> list:
+        """
+        Generate layered orders with dynamic sizing and strategic placement.
         """
         orders = []
-        
-        # Only proceed if there are buy and sell orders in the market
         if len(order_depth.buy_orders) == 0 or len(order_depth.sell_orders) == 0:
             return orders
-            
-        # Find best bid and ask prices
+
         best_bid = max(order_depth.buy_orders.keys())
         best_ask = min(order_depth.sell_orders.keys())
-        
-        # Calculate mid price
-        mid_price = (best_bid + best_ask) / 2
-        
-        # Predict next price using polynomial fit
-        predicted_price = self.predict_next_price(mid_price)
-        
-        # Use predicted price to determine our price bias
-        # If predicted_price > mid_price, we expect price to rise
-        # If predicted_price < mid_price, we expect price to fall
-        price_bias = predicted_price - mid_price
-        
-        # Calculate dynamic spread based on prediction
-        dynamic_spread = self.calculate_dynamic_spread(mid_price, predicted_price)
-        
-        # Calculate layer spacing
-        layer_spacing = max(1, int(dynamic_spread * 0.5 * self.layer_spacing_factor))
-        
-        # Position bias - adjust our base order sizes based on current position
-        position_ratio = current_position / self.position_limit  # Range: -1.0 to 1.0
-        
-        # Calculate remaining capacity for buy/sell
-        buy_capacity = self.position_limit - current_position
-        sell_capacity = self.position_limit + current_position
-        
-        # Center our orders around the predicted price instead of mid price
-        center_price = mid_price + (price_bias * 0.5)  # Only partially shift toward prediction
-        
-        # Place layered orders
+
+        # Use EMA prediction for price bias
+        predicted_price = self.predict_next_price((best_bid + best_ask) / 2)
+
+        # Calculate dynamic spread considering liquidity and volatility
+        dynamic_spread = self.calculate_dynamic_spread((best_bid + best_ask) / 2, predicted_price, order_depth)
+
+        # Layering orders based on prediction
         for layer in range(self.num_layers):
-            # Calculate layer-specific spread (increases with each layer)
-            layer_spread = dynamic_spread + (layer * layer_spacing * 2)
+            layer_size = self.calculate_order_size(predicted_price, current_position)  # Kelly-based order size
+            # Layering logic remains the same with some refinements
+            # Adjust layer price and spread, consider market conditions
+            layer_spread = dynamic_spread + (layer * dynamic_spread * 2)
             
-            # Calculate prices for this layer, centered around our center_price
-            layer_bid = int(center_price - layer_spread / 2) - (layer * layer_spacing)
-            layer_ask = int(center_price + layer_spread / 2) + (layer * layer_spacing) + 1
-            
+            layer_bid = int(predicted_price - layer_spread / 2) - (layer * dynamic_spread)
+            layer_ask = int(predicted_price + layer_spread / 2) + (layer * dynamic_spread) + 1
+
             # Ensure our prices are competitive
             layer_bid = min(layer_bid, best_bid + 1)
             layer_ask = max(layer_ask, best_ask - 1)
 
-            # Calculate base order size for this layer
-            # Orders get larger as they move away from mid price
-            layer_size = int(self.base_order_size * (self.size_multiplier ** layer))
-            
-            # Adjust sizes based on position
-            buy_size = int(layer_size * (1 - 0.5 * position_ratio))  # Buy less when position is high
-            sell_size = int(layer_size * (1 + 0.5 * position_ratio))  # Sell more when position is high
-            
-            # Price trend bias - buy more if price rising, sell more if falling
-            trend_factor = 0.2 * (price_bias / max(1, abs(mid_price)) * 100)  # Normalized trend factor
-            buy_size = int(buy_size * (1 + trend_factor)) if price_bias > 0 else buy_size  
-            sell_size = int(sell_size * (1 - trend_factor)) if price_bias > 0 else sell_size
-            
-            # Ensure minimum size is at least 1
-            buy_size = max(1, buy_size)
-            sell_size = max(1, sell_size)
-            
-            # Make sure we don't exceed position limits
+            # Place orders
+            buy_capacity = self.position_limit - current_position
+            sell_capacity = self.position_limit + current_position
+
+            buy_size = layer_size
+            sell_size = layer_size
+
+            # Don't exceed position limits
             buy_size = min(buy_size, buy_capacity)
             sell_size = min(sell_size, sell_capacity)
-            
-            # Only place orders if the size is valid
+
             if buy_size > 0:
                 print(f"Placing buy order for {self.product}: Price {layer_bid}, Size {buy_size}, Layer {layer+1}")
                 orders.append(Order(self.product, layer_bid, buy_size))
                 buy_capacity -= buy_size
-            
+
             if sell_size > 0:
                 print(f"Placing sell order for {self.product}: Price {layer_ask}, Size {sell_size}, Layer {layer+1}")
                 orders.append(Order(self.product, layer_ask, -sell_size))
                 sell_capacity -= sell_size
-            
-            # Stop placing orders if we've reached position limits
+
             if buy_capacity <= 0 and sell_capacity <= 0:
                 break
-                
+        
         return orders
-
 
 class StablePriceMM:
     """
